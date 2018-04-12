@@ -1,0 +1,4 @@
+This project is NOT open-sourced.  Shared journals are complicated and hard
+and I do not want anyone using this code until I have some assurances that
+it actually works.  It is my intention that version 1.0 have a permissive
+license.  Contact the author if you wish to make use of this code.

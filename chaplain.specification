@@ -1,0 +1,274 @@
+Definitions:
+
+Cluster - A set of systems implementing the Chaplain service
+Node - An element of the cluster.  May include a permanent storage component.
+Agreed Log - A series of log entries which has been agreed to by a quorum.
+Log Entry - The basic element of an agreed log.  May contain multiple messages.
+Cluster Log - The agreed log of the cluster.
+Core Node - A node which participates in determining and forming quorums.
+Writer Node - A node which receives write requests for the cluster log.
+Reader Node - A node which receives read requests.
+Writer Log - An agreed log managed by a writer node.
+Configuration Log - An agreed log managed by a core node for cluster configuration.
+Write Client - An outside agent which has the ability request writes to the cluster log.
+Master Node - The core node which can write to the cluster log.
+Cluster Configuration - The set of all nodes, the cluster master node, and the cluster master era.
+Quorum - A majority of the core nodes.
+Node Offset - The number of core node entries from the agreed master node to
+  a core node in the cluster configuration, excluding one end, and counting circularly.
+
+Note: only one outstanding log entry is permitted for an agreed log.  Therefore,
+the proposal of a new log entry confirms that all prior entries are agreed.
+
+Core nodes maintain a local copy of each of the writer logs and the cluster log.
+
+Writer log entries are added to the local copy and then acknowledged to the writer
+node and to all other core nodes.
+
+At set intervals (on a "writer tick"), a writer node collects the write requests
+it has received into a writer log entry.  The writer node entry message includes
+a list of all of the core and reader nodes, along with the latest acknowledged
+writer log entry for each.  This entry is broadcast to all core nodes and all
+reader nodes, along with any unacknowledged entries to the nodes in question.
+(Except for nodes which are considered "bad".)  When a quorum has accepted the
+write, the writer node acknowledges all included write requests with the cluster
+ID of the requests. (This is the writer node id and writer node entry
+id.)  If a quorum has not accepted the write by the time of the next writer tick,
+the writer "stalls".  The next writer log entry message does not include a new
+writer entry (and the current entry is not repeated for acknowleding nodes)
+Core nodes acknowledge writer log entries to the writer node and to each other,
+to include the highest index seen for this log from each of the core nodes.
+
+If a node receives a stalled writer log entry message, but it observes a quorum
+for the message, it acknowledges with a quorum found message. (This message need
+only include the core nodes which it has acknowledgements for that the writer
+lacks.)
+
+At set intervals (on a "cluster tick"), the master proposes an entry to the cluster log.
+This entry updates the current entry id on some or all of the writer logs.  If
+master is strickly behind any other core node, it appends a configuration
+change entry setting the new master.  If it is ahead of any node, it includes
+the data for missing writer log entries.  If there is no need for abdication,
+the master selects as an heir the node with the next successive id from among
+the most current nodes.  Notice of heirdom is included in the message to the
+heir.
+
+If the heir receives a cluster log entry proposal that indicates that the
+master is strictly behind, and by at least two for at least one log, it starts
+an election.
+
+If a node other than the heir receives a cluster log entry proposal that indicates
+that the master is strictly behind, and for at least one writer log, more than
+one behind, it considers starting an election.
+
+If a node receives a cluster log entry proposal that indicates that the master
+is behind for a writer node by at least two, or if by one, but this remains
+unupdates for three successive messages from the master it considers updating
+the master.  The delay is offset ticks, and resets if the master updates this
+log.  Such a reset does not affect considerations to start an election.
+
+If a node receives no messages from the master for the period of the master
+election timeout, but has received messages from half of the remaining nodes,
+it considers starting an election.
+
+A node considering starting an election will wait for the election delay before
+attempting to start an election.  The election delay is 0.5 cluster ticks plus
+1.1 ticks per offset of the node.
+
+When a node decides to start an election, it increments its era, and broadcasts
+a cluster node log entry with it as the master.
+
+If it receives a cluster log entry with a past or present era and a new master,
+it responds with the current era and master.  If it receives a cluster log
+entry with the current era from the current master, but with a different master,
+it replaces the master (and the log entry), and acknowedges to both the current
+and new masters.
+
+When a node receives a cluster log entry with a future era, but has recieved an
+message from the master less than the master election timeout minus one cluster
+tick, it responds with the current era and master.  If the entry is strictly
+behind for the writer logs and by more than one for at least one of them, it
+adds the current indices to the refusal response.  If it is the heir, it
+includes the data.  Otherwise, it updates its era and master and acknowledges
+the entry.
+
+As a node receives responses from an election attempt, it keep track of the
+responses to determine if another node has achieved priority.  A node
+achieves priority if it has more supporters than can be reached by any other
+node, or has the same number and a lower offset.  If another node achieves
+priority before a node fails an election, it signals its followers and any not
+yet responded nodes to switch to the new master.  If it has not received a
+vote request from the node, it sends and UPDATE ME message.  If it has, it
+accepts the message, though it previously rejected it.  It also waits for
+a cluster log timeout before attempting a new election.
+
+Example:  Nodes A, B, C, and D start elections at the same time in a 9-node
+core.  E, F, and G accept A, H accepts B, and I accepts C.  As D receives
+notices, it dermines that the four votes for A will exceed the votes for
+either B, C, or itself even before I responds.
+
+If a node determines that it itself has priority, but the election times
+out, it starts another election immediately.  If an election times out, and
+a node does not find any other node with priority (due to lack of responses),
+it waits an election delay minus 1.5 ticks before starting an election,
+utilizing the lowest node offset of itself and any accepting nodes.
+
+
+Synchronization:
+A write request can include a synchronization clause, having the cluster id
+of a message.  Such a write request will not be added to a writer log until
+the message has been agreed in the cluster log.  Support for synchronization
+requires that writer nodes be reader nodes.
+
+Cluster Configuration Changes:
+The steps in updating the node list for a cluster are as follows:
+1) Initialize all new nodes.  Initialized nodes which are to be added to the
+core function as readers except that they participate in writer log
+acknowledgments.
+2) Send a write request message to a writer node, with the new configuration.
+   - The write node will refuse the change unless it can ping all new nodes.
+   - The new configuration is sent to all nodes--current and new.
+   - The state of the transition is "INITIALIZING".
+   - New nodes are considered "bad" by all writers and core nodes.
+3) New nodes send UPDATE ME requests in response to log update messages.
+   - These requests might be serialized initially to prevent saturation.
+4) When a node is no longer bad according to the writers, the master will
+consider marking it not bad.
+5) When the master observes that the percentage of bad core nodes under the
+new configuration is no more than the percentage of bad core nodes under
+current configuration, and that a quorum of the new core is receiving each
+other's writer log acknowledgments, it selects a member of this quorum as
+master, and proposes a MASTER message to the cluster log.  This updates the
+era, even if remains as master.  Old core nodes no longer participate in
+the cluster when they observe that a quorum in new core has accepted this
+message.
+6) The new master sends the next write to the old core nodes as well, but
+they do not affect quorum.
+7) When the new master determines that all writer nodes in the new
+configuration are good, it signals any external router that the old writers
+are to be drained.  It then sends DRAIN to any current writer nodes which
+are not writer nodes in the new configuration.
+8) Writer nodes receiving DRAIN refuse new write requests, responding with
+the new list of writer nodes.
+  - Any additional log entries that are generated include the "DRAINING" flag.
+  - The final log enter includes a DRAINED entry.
+9) If the master proceeds for more than three ticks without seeing a
+DRAINED entry for a draining node, it proposes a FLUSH message to the cluster
+log for the nodes in question.
+  - Nodes receiving a FLUSH message will refuse additional writes to the
+    affected writer logs that do not include the FLUSH flag.
+  - Nodes acknowleding a FLUSH message will include thier current index for
+    the affected writer logs.
+10) If needed, the master will send UPDATE ME, and then send out writer log
+entries for the affected logs (with the FLUSH FLAG).
+  - Once a writer node is confirmed DRAINED or FLUSHed, it is no longer
+    included in cluster activities.
+11) Once all old writer nodes are either drained or flushed, it waits for the
+percentage of new good reader nodes to meet the percentage of current good
+reader nodes.
+12) The master signals any external router that the old readers are to be
+disabled.  It then send TERM to the old readers.
+13) Reader nodes which acknowledge the TERM are included in a TERM entry in
+the cluster log.  Those which do are are included in a TIMEOUT entry after
+two ticks.
+14) The cluster log entry which includes the final TERM or TIMEOUT includes
+a COMPLETED flag.
+15) The master node messages all writers that the configuration change is
+COMPLETED.  Once these have all acknowledged, it proposes a cluster log
+entry that includes CONFIG OPEN.
+16) Writer nodes may accept a new configuration once they have received
+completed.  Core nodes will acknowledge configuration changes once
+COMPLETED has been agreed.
+
+
+IMPLEMENTATIONS WITH DATABASES:
+Almost all practical implmentations will require some sort of database.  This
+enables fast reads, write validation, and log compression.  Database support
+requires the following adjustments:
+
+1) All writer nodes need to also be reader nodes.
+2) Each reader node has its own database.
+3) If the database is ACID or transactional, client connections to the writer
+nodes will need to be mirrored by reader nodes.
+4) If the database is transactional, writer nodes will by default attempt to
+apply write requests locally before adding them to a writer log entry,
+rolling back the transaction if it attempt succeeds, and failing the request
+if it fails.
+5) Writes are performed in the order found in the cluster log.  If the
+implentation is asynchronous, the results of the writes are stored at the
+reader nodes.
+6) Log compression is implementation dependent.
+7) UPDATE ME semantics are more involved in the presence of log compression.
+8) It is possible for the databases to far lag the cluster log.
+Implementations need to be prepared for this.
+
+SYNCHRONOUS DATABASES:
+1) If access to the databases is to be synchronous, core nodes must also
+maintain databases.
+2) Writes are only acknowledged when core nodes apply them.  All nodes hold
+the results of the writes until they see the master acknowledge them.  The
+master's acknowledgement includes the results of the writes.
+3) Core nodes will trigger elections if they do not see the master's
+acknowledgement of writes.
+4) In order to avoid timeouts caused by long writes, nodes should respond
+RECIEVED periodically while the write progresses.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+The cluster operates on a trusted subnet.  IP addresses are used for configuration.  In the event
+of a node failure, no manual actions at the remaining nodes are requried to bring a replacement
+system in for the failed node.
+
+
+
+
+
+Message Types:
+Basic
+Configuration
+
+Write Request:
+ - Client ID
+ - Client Message ID
+ - Contents
+ - Signature
+
+
+Writer Log Entry:
+ - Write Node ID
+ - Write Node Entry ID
+ - Write Request (minus signature)
+ - Write Request (minus signature)
+ - Write Request (minus signature)
+ - Write Request (minus signature)
+
+Cluster Log Entry: (Basic)
+ - Cluster Node Entry ID
+ - - Writer Node ID
+   - Writer Node Entry ID
+ ...
+ 
+Cluster Log Message:
+ - Master node ID
+ - Master node era
+ - Cluster Log Entry
+
+ 
+Quorum Found Message:
+ - Write Node Entry ID
+ - - Core Node ID
+...
+
