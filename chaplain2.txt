@@ -1,0 +1,171 @@
+Definitions:
+
+Cluster - A collection of systems implementing the chaplain service
+Node - An element of a cluster, having a server and a persistent store
+Serializer Node - A node which participates in determing quorums and writes to the cluster journal
+Consistent Journal - A series of messages which has been agreed by a quorum of the cluster, possibly excepting the final message
+Journal Message - A series of entries entered into a journal at the same time
+Cluster Journal - The consistent journal of the cluster, consisting of two or more streams.
+Cluster Configuration Stream - The series of entries in the cluster journal which control the configuration of the cluster
+Data Stream - A series of entries in the cluster journal which are the object of the cluster.
+              Generally associated with some database.
+Executor Node - A node which communicates the state of the cluster to clients.  If a data stream is associated with a database,
+              the Executor Node will act as a slave to the virtual master implied by the data stream.  In particular, if the
+              database has permissions or transactions, then the writing clients of the cluster will be shadowed within the node
+              as separate client connections to the database.  Furthermore, only Executor Nodes interpret the data stream entries,
+              and therefore log compression is a function which is accomplished through the Executor Nodes.  Each client stores the
+              results of each entry until cleared in an auxilary store.
+Ingest Node - A node which permits clients to request writes to the cluster journal Each Ingest Node masters its own consistent
+              journal, assigning guaranteed unique ids to each write request.  Writer journal messages are broadcast to serializer
+              and executor nodes.
+Config Node - An ingest node dedicated to handling node configuration requests.  Config journal messages are broadcast to the
+              entire cluster.
+
+Note: Master elections among the serilizers are managed via special fields in cluster messages.
+
+Observation:  It is not possible to ensure or determine that a client has received the response to a write request.  The specification therefore does not rely on the client to received responses.
+
+Client write request format:
+  Field               size
+  Protocol id:           1
+  Client id:             4
+  Client message id:     4
+  Message type:          1
+  Signature type:        1
+  Signature:          depends on type
+  Messages:           varies
+
+Ingest Node Journal Entry:
+  Field               size
+  Protocol id:           1
+  Client id:             1
+  Client message id:     4
+  Message type:          1
+  Messages:           varies
+
+Ingest Node Journal Message:
+  Field                size
+  Protocol id:            1
+  Ingest Node id:         1
+  Ingest Node Journal id: 2
+  Ingest Journal Index:   4
+  Ingest Node Journal Entries (varies)
+
+Cluster Journal Entry (Data):
+  Field                size
+  Protocol id:            1
+  Entry type:             1
+  Ingest Node id:         1
+  Ingest Node Journal id: 2
+  Ingest Journal Index:   4
+
+Cluster Journal Entry (Config):
+  Field                size
+  Protocol id:            1
+  Entry type:             1
+  Stage:                  1
+  Data:                 varies
+
+Cluster Journal Message:
+  Field                size
+  Protocol id:            1
+  Regime id:              4
+  Message Index:          8
+  Journal Entries       varies
+  Final                  Bit
+  Master node id:         1
+  Ingest Journal Entry Ack (see below)
+  
+Config Message (Add Executor Node):
+  Field                size
+  Node id:                1
+Stages: Catchup, Live
+
+
+Config Message (Remove Executor Node):
+  Field                size
+  Node id:                1
+Stages: Implement
+
+Config Message (Add Ingest Node):
+  Field                size
+  Node id:                1
+Stages: Catchup, Live
+
+Config Message (Add Config Node):
+  Field                size
+  Node id:                1
+Stages: Catchup, Live
+
+
+Config Message (Remove Ingest Node):
+  Field                size
+  Node id:                1
+Stages: Block, Drop
+
+Config Message (New Serializer Set):
+  Field                size
+  Node ids:              1 x n
+Stages:
+ Nominate  - Readers subscribe also to new serializers
+             New serializers subscribes to Ingest Nodes
+ Refuse    - Readers unsubscribe from new serializers
+             New serializers unsubscribes from Ingest Nodes
+ Implement - Old master stops writing to journal log
+             New master awaits quorum from both old and new serializer sets
+ Confirm   - Readers unsubscribe from old serializers
+             Old serializers unsubscribes from writers
+             New master starts writing to journal log
+
+Note:  If the old serializers do not receive a quorum of "Implement", they will elect a new master.  This new master will write
+  to the journal log until it sends "Implement".  The new master does not proceed until it has a quorum of this new implement
+  message from both the old and new sets.
+
+Refuse will occur if:
+  1) The new set is the same as the old set (even if the master is different.)
+  2) The master times out any node in the new serializer set.  
+  
+Config Message (Add Client):
+  Field               size
+  Client Id:             4 (set at executor)
+  ACL id:               15 (Full cluster entry id)
+  Signature Type:        1
+  Public Key:          varies
+
+Config Message (Remove Client):
+  Field               size
+  Client Id:             4
+
+Ingest Journal Message Ack (Non-Serializer):
+  Node id:                1
+  Ingest Node Journal id: 2
+  Ingest Journal Index:   4
+
+Ingest Journal Message Ack (Serializer):
+  [
+    Node id:                1
+    Ingest Node Journal id: 2
+    Ingest Journal Index:   4
+  ]
+The serializers respond with thier view of the current state of all of the nodes in the cluster that should see the message.  The
+ack is immediate.
+
+
+Notes:
+The set of messages included in a single client request form a natural transaction for an ACID database.  Checkpoints
+and the like can be included in the message set.
+
+Results of the individual messages in a request are stored in the executor nodes.  A read request for a message returns the
+results of all earlier requests for that client, deletes them, and is gossipped to the other executors.
+
+Client message ids start at 1 and increment.  A message with an existing id and a mismatching signature is flagged as
+compromised.  The client log is terminated.  Likewise, executors cross-check request signatures.
+
+In a multi-permissioned environment, it seems likely that reserving an injest node for each client is beneficial.  In particular,
+such a node could function as an executor for the parts of the system that the client has permission to access, and can
+pre-validate requests.
+
+If the serializers are run index-only, then quorum requirements for the injesters are strictly a matter of resilience, as a
+single node will evenetually cause any message to be executed (once its predecessors have executed).
+
+

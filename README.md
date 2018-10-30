@@ -2,7 +2,7 @@
 
 Chaplain is a shared journal service.  The chaplain specification is inspired
 by Raft, but is intended to specify a service, whereas Raft specifies a 
-protocal.
+protocol.
 
 The prototype will be in Ruby, as I want to minimize the number of things I
 need to learn all at once.  The pre-version 1 of the prototype is NOT going
